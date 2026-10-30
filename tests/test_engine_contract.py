@@ -660,3 +660,85 @@ def test_t11_no_default_undetermined():
     assert trace.event == "frame_undetermined"
     assert trace.selected_frame is None
     assert trace.undetermined_reason == "no_applicable_rule_no_valid_proposal_no_default"
+
+
+# --- T2: deterministic trace under fixed inputs ---
+
+def test_t2_deterministic_trace():
+    """T2: same input, same fixed classifier proposal, same previous_frame
+    -> identical selected_frame and identical trace_hash."""
+    from igl_cognitive.trace import trace_hash
+
+    engine = Engine(rules=[hard_math_strong()])
+    context = {"hard_math_strong": True}
+    classifier = classifier_philosophy()
+    previous = CognitiveFrame(
+        register="hypothesis",
+        coordinate_system="philosophy",
+        strategy="conceptual_exploration",
+        model_tier="medium",
+        revision=0,
+    )
+
+    t1 = engine.select(context=context, classifier_proposal=classifier, previous_frame=previous)
+    t2 = engine.select(context=context, classifier_proposal=classifier, previous_frame=previous)
+
+    assert t1.selected_frame == t2.selected_frame
+    assert t1.event == t2.event
+    assert t1.resolution == t2.resolution
+    assert t1.revision == t2.revision
+    assert trace_hash(t1) == trace_hash(t2)
+
+
+# --- T12: no plaintext secret in trace ---
+
+def test_t12_no_plaintext_secret_in_trace():
+    """T12: trace must not contain raw user text, only hashes.
+
+    We pass a 'secret' string inside context under a condition key.
+    It must NOT appear in the serialized trace as plaintext.
+    """
+    from igl_cognitive.trace import trace_to_dict
+
+    secret_text = "SECRET-DO-NOT-LEAK-12345"
+    engine = Engine(rules=[hard_math_strong()])
+
+    # The secret is part of the context, but not a condition key we use.
+    # It is hashed into input_hash/context_hash, not stored as text.
+    context = {
+        "hard_math_strong": True,
+        "user_raw_text": secret_text,
+    }
+
+    trace = engine.select(context=context, classifier_proposal=None, previous_frame=None)
+    serialized = str(trace_to_dict(trace))
+
+    assert secret_text not in serialized
+
+
+# --- T15: rule order does not affect outcome ---
+
+def test_t15_rule_order_does_not_affect_result():
+    """T15: same set of rules, different order -> identical selected_frame,
+    identical revision, identical ruleset_hash."""
+    from igl_cognitive.rules import ruleset_hash
+
+    rules_a = [hard_math_strong(), soft_keep_hypothesis()]
+    rules_b = [soft_keep_hypothesis(), hard_math_strong()]
+
+    engine_a = Engine(rules=rules_a)
+    engine_b = Engine(rules=rules_b)
+
+    context = {
+        "hard_math_strong": True,
+        "soft_keep_hypothesis": True,
+    }
+
+    t_a = engine_a.select(context=context, classifier_proposal=None, previous_frame=None)
+    t_b = engine_b.select(context=context, classifier_proposal=None, previous_frame=None)
+
+    assert t_a.selected_frame == t_b.selected_frame
+    assert t_a.revision == t_b.revision
+    assert t_a.event == t_b.event
+    assert t_a.resolution == t_b.resolution
+    assert ruleset_hash(rules_a) == ruleset_hash(rules_b)
