@@ -107,7 +107,7 @@ def _classifier_matches_allowed(
         if entry == target:
             return entry
     return None
-    
+
 
 class Engine:
     """Deterministic cognitive frame selector (HARD-only stage)."""
@@ -440,7 +440,79 @@ class Engine:
                 undetermined_reason=None,
             )
 
-        # 4. SOFT tie, no default yet
+                # 4. DEFAULT, then UNDETERMINED
+        if self.default_frame is not None:
+            # Is default inside ALLOWED?
+            default_entry = (
+                self.default_frame.register,
+                self.default_frame.coordinate_system,
+                self.default_frame.strategy,
+                self.default_frame.model_tier,
+            )
+            if default_entry in allowed:
+                reg, coord, strat, tier = default_entry
+                candidate = CognitiveFrame(
+                    register=reg, coordinate_system=coord, strategy=strat,
+                    model_tier=tier, revision=target_revision,
+                )
+                if previous_frame is not None and not frames_same_config(candidate, previous_frame):
+                    new_revision = previous_frame.revision + 1
+                else:
+                    new_revision = target_revision
+                return DecisionTrace(
+                    event="frame_selection",
+                    ruleset_hash=ruleset_h,
+                    frame_registry_hash=registry_h,
+                    input_hash=input_h,
+                    context_hash=context_h,
+                    state_hash=state_h,
+                    allowed_frames_hash=allowed_h,
+                    rules_fired=all_rules_fired,
+                    classifier=(
+                        {
+                            "proposal": {
+                                "register": classifier_proposal.register,
+                                "coordinate_system": classifier_proposal.coordinate_system,
+                                "strategy": classifier_proposal.strategy,
+                                "model_tier": classifier_proposal.model_tier,
+                            },
+                            "version": "stage3",
+                            "params_hash": _hash_payload({}),
+                        }
+                        if classifier_proposal is not None
+                        else None
+                    ),
+                    conflict=False,
+                    conflict_reason="none",
+                    resolution="default",
+                    previous_frame=(
+                        {
+                            "register": previous_frame.register,
+                            "coordinate_system": previous_frame.coordinate_system,
+                            "strategy": previous_frame.strategy,
+                            "model_tier": previous_frame.model_tier,
+                            "revision": previous_frame.revision,
+                        }
+                        if previous_frame is not None
+                        else None
+                    ),
+                    selected_frame={
+                        "register": reg,
+                        "coordinate_system": coord,
+                        "strategy": strat,
+                        "model_tier": tier,
+                        "revision": new_revision,
+                    },
+                    revision=new_revision,
+                    undetermined_reason=None,
+                )
+
+        # 5. UNDETERMINED: choose reason
+        if not hard_rules and not applicable_soft:
+            reason = "no_applicable_rule_no_valid_proposal_no_default"
+        else:
+            reason = "soft_tie_no_default"
+
         return DecisionTrace(
             event="frame_undetermined",
             ruleset_hash=ruleset_h,
@@ -467,5 +539,5 @@ class Engine:
             ),
             selected_frame=None,
             revision=target_revision,
-            undetermined_reason="soft_tie_no_default",
+            undetermined_reason=reason,
         )

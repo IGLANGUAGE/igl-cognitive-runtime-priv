@@ -560,3 +560,103 @@ def test_t18_soft_float_weight_rejected_at_engine_construction():
     )
     with pytest.raises(ValueError):
         Engine(rules=[bad_rule])
+
+
+# --- T6: no rules, classifier valid -> classifier_accepted ---
+
+def test_t6_no_rules_classifier_valid():
+    """T6: no HARD, no SOFT, classifier proposes a valid frame.
+
+    Expected: classifier_accepted.
+    """
+    engine = Engine(rules=[])
+    context = {}
+
+    trace = engine.select(
+        context=context,
+        classifier_proposal=classifier_memory(),
+        previous_frame=None,
+    )
+
+    assert trace.event == "frame_selection"
+    assert trace.resolution == "classifier_accepted"
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["register"] == "memory"
+
+
+# --- T7: no rules, classifier invalid -> UNDETERMINED ---
+
+def test_t7_no_rules_classifier_invalid():
+    """T7: no rules, classifier proposes a frame not in VALID_FRAMES.
+
+    Expected: UNDETERMINED, no selected_frame.
+    """
+    engine = Engine(rules=[])
+    context = {}
+
+    invalid_classifier = CognitiveFrame(
+        register="conversation",
+        coordinate_system="mathematics",  # not in VALID_FRAMES
+        strategy="recall",
+        model_tier="small",
+        revision=0,
+    )
+
+    trace = engine.select(
+        context=context,
+        classifier_proposal=invalid_classifier,
+        previous_frame=None,
+    )
+
+    assert trace.event == "frame_undetermined"
+    assert trace.selected_frame is None
+    assert trace.undetermined_reason is not None
+
+
+# --- T10: DEFAULT applied when no unique selection ---
+
+def test_t10_default_applied():
+    """T10: no HARD/SOFT, classifier rejected, default_frame set and in ALLOWED.
+
+    Expected: SELECTED, resolution=default.
+    """
+    default = CognitiveFrame(
+        register="conversation",
+        coordinate_system="none",
+        strategy="conceptual_exploration",
+        model_tier="small",
+        revision=0,
+    )
+    engine = Engine(rules=[], default_frame=default)
+    context = {}
+
+    # Use two SOFTs with equal weight to force a tie, or no classifier + no SOFT
+    trace = engine.select(
+        context=context,
+        classifier_proposal=None,
+        previous_frame=None,
+    )
+
+    assert trace.event == "frame_selection"
+    assert trace.resolution == "default"
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["register"] == "conversation"
+    assert trace.selected_frame["coordinate_system"] == "none"
+    assert trace.selected_frame["strategy"] == "conceptual_exploration"
+
+
+# --- T11: no DEFAULT -> UNDETERMINED ---
+
+def test_t11_no_default_undetermined():
+    """T11: no HARD/SOFT, classifier rejected, no default_frame.
+
+    Expected: UNDETERMINED with no_applicable_rule_no_valid_proposal_no_default.
+    """
+    engine = Engine(rules=[], default_frame=None)
+    context = {}
+
+    trace = engine.select(context=context, classifier_proposal=None, previous_frame=None)
+
+    assert trace.event == "frame_undetermined"
+    assert trace.selected_frame is None
+    assert trace.undetermined_reason == "no_applicable_rule_no_valid_proposal_no_default"
