@@ -356,3 +356,207 @@ def test_t3_conflict_does_not_grow_revision():
     assert trace.selected_frame is None
     # revision field in trace mirrors previous.revision when no new frame selected
     assert trace.revision == 5
+
+
+# --- SOFT helpers ---
+
+def soft_keep_hypothesis() -> Rule:
+    """SOFT: prefer register=hypothesis, weight=2."""
+    return Rule(
+        id="SOFT_KEEP_HYPOTHESIS",
+        priority="SOFT",
+        condition="soft_keep_hypothesis",
+        frame={"register": "hypothesis"},
+        scope="continuation",
+        weight=2,
+        min_model_tier=None,
+    )
+
+
+def soft_keep_philosophy() -> Rule:
+    """SOFT: prefer coordinate_system=philosophy, weight=1."""
+    return Rule(
+        id="SOFT_KEEP_PHILOSOPHY",
+        priority="SOFT",
+        condition="soft_keep_philosophy",
+        frame={"coordinate_system": "philosophy"},
+        scope="continuation",
+        weight=1,
+        min_model_tier=None,
+    )
+
+
+def soft_prefer_memory() -> Rule:
+    """SOFT: prefer register=memory, weight=5."""
+    return Rule(
+        id="SOFT_PREFER_MEMORY",
+        priority="SOFT",
+        condition="soft_prefer_memory",
+        frame={"register": "memory"},
+        scope="recall",
+        weight=5,
+        min_model_tier=None,
+    )
+
+
+def classifier_hypothesis_philosophy() -> CognitiveFrame:
+    return CognitiveFrame(
+        register="hypothesis",
+        coordinate_system="philosophy",
+        strategy="conceptual_exploration",
+        model_tier="medium",
+        revision=0,
+    )
+
+
+def classifier_memory() -> CognitiveFrame:
+    return CognitiveFrame(
+        register="memory",
+        coordinate_system="none",
+        strategy="recall",
+        model_tier="small",
+        revision=0,
+    )
+
+
+# --- T5a: SOFT and classifier agree -> classifier_accepted ---
+
+def test_t5a_soft_and_classifier_agree():
+    """T5a: classifier proposes a frame inside ALLOWED that also matches SOFT.
+
+    Expected:
+      SELECTED
+      resolution = classifier_accepted
+      conflict = False
+    """
+    engine = Engine(rules=[soft_keep_hypothesis(), soft_keep_philosophy()])
+    context = {
+        "soft_keep_hypothesis": True,
+        "soft_keep_philosophy": True,
+    }
+
+    trace = engine.select(
+        context=context,
+        classifier_proposal=classifier_hypothesis_philosophy(),
+        previous_frame=None,
+    )
+
+    assert trace.event == "frame_selection"
+    assert trace.resolution == "classifier_accepted"
+    assert trace.conflict is False
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["register"] == "hypothesis"
+    assert trace.selected_frame["coordinate_system"] == "philosophy"
+
+
+# --- T5b: SOFT and classifier disagree, classifier valid inside ALLOWED ---
+
+def test_t5b_soft_and_classifier_disagree():
+    """T5b: SOFT prefers hypothesis, but classifier proposes memory (valid inside ALLOWED).
+
+    SOFT is ranking, not restriction. Classifier wins.
+
+    Expected:
+      SELECTED
+      resolution = classifier_accepted
+      selected = memory/none/recall
+    """
+    engine = Engine(rules=[soft_keep_hypothesis(), soft_prefer_memory()])
+    context = {
+        "soft_keep_hypothesis": True,
+        "soft_prefer_memory": True,
+    }
+
+    trace = engine.select(
+        context=context,
+        classifier_proposal=classifier_memory(),
+        previous_frame=None,
+    )
+
+    assert trace.event == "frame_selection"
+    assert trace.resolution == "classifier_accepted"
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["register"] == "memory"
+    assert trace.selected_frame["coordinate_system"] == "none"
+    assert trace.selected_frame["strategy"] == "recall"
+
+
+# --- T14: classifier valid inside ALLOWED, differs from SOFT ---
+
+def test_t14_classifier_wins_over_soft():
+    """T14: SOFT ranks hypothesis above memory; classifier proposes memory.
+
+    Expected: classifier_accepted, selected = memory/none/recall.
+    """
+    engine = Engine(rules=[soft_keep_hypothesis(), soft_prefer_memory()])
+    context = {
+        "soft_keep_hypothesis": True,
+        "soft_prefer_memory": True,
+    }
+
+    trace = engine.select(
+        context=context,
+        classifier_proposal=classifier_memory(),
+        previous_frame=None,
+    )
+
+    assert trace.event == "frame_selection"
+    assert trace.resolution == "classifier_accepted"
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["register"] == "memory"
+
+
+# --- T16: SOFT tie, no default, no classifier -> UNDETERMINED ---
+
+def test_t16_soft_tie_no_default_undetermined():
+    """T16: two SOFT rules with equal weight prefer different frames;
+    no DEFAULT, no classifier.
+
+    Expected:
+      UNDETERMINED
+      selected_frame = None
+      undetermined_reason = soft_tie_no_default
+    """
+    soft_a = Rule(
+        id="SOFT_A",
+        priority="SOFT",
+        condition="soft_a",
+        frame={"register": "hypothesis"},
+        scope="s",
+        weight=1,
+        min_model_tier=None,
+    )
+    soft_b = Rule(
+        id="SOFT_B",
+        priority="SOFT",
+        condition="soft_b",
+        frame={"register": "memory"},
+        scope="s",
+        weight=1,
+        min_model_tier=None,
+    )
+    engine = Engine(rules=[soft_a, soft_b])
+    context = {"soft_a": True, "soft_b": True}
+
+    trace = engine.select(context=context, classifier_proposal=None, previous_frame=None)
+
+    assert trace.event == "frame_undetermined"
+    assert trace.selected_frame is None
+    assert trace.undetermined_reason == "soft_tie_no_default"
+
+
+# --- T18: SOFT weight must be positive int (already in is_valid_rule) ---
+
+def test_t18_soft_float_weight_rejected_at_engine_construction():
+    """T18: Engine must reject a SOFT rule with float weight at construction."""
+    bad_rule = Rule(
+        id="BAD",
+        priority="SOFT",
+        condition="bad",
+        frame={"register": "memory"},
+        scope="s",
+        weight=1.5,  # type: ignore[arg-type]
+        min_model_tier=None,
+    )
+    with pytest.raises(ValueError):
+        Engine(rules=[bad_rule])

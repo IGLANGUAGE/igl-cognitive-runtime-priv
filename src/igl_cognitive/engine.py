@@ -72,6 +72,43 @@ def _tier_satisfies(tier: str, min_tier: str | None) -> bool:
     return _TIER_RANK.get(tier, -1) >= _TIER_RANK.get(min_tier, 999)
 
 
+def _frame_satisfies_soft(
+    register: str,
+    coord: str,
+    strategy: str,
+    partial_frame: dict[str, str],
+) -> bool:
+    """Does the full frame satisfy the SOFT rule's partial frame?"""
+    value_by_field = {
+        "register": register,
+        "coordinate_system": coord,
+        "strategy": strategy,
+    }
+    for field, expected in partial_frame.items():
+        if field in value_by_field and value_by_field[field] != expected:
+            return False
+    return True
+
+
+def _classifier_matches_allowed(
+    classifier: CognitiveFrame,
+    allowed: list[tuple[str, str, str, str]],
+) -> tuple[str, str, str, str] | None:
+    """If classifier (triple + tier) is inside ALLOWED, return that allowed entry."""
+    if classifier.model_tier not in VALID_TIERS:
+        return None
+    target = (
+        classifier.register,
+        classifier.coordinate_system,
+        classifier.strategy,
+        classifier.model_tier,
+    )
+    for entry in allowed:
+        if entry == target:
+            return entry
+    return None
+    
+
 class Engine:
     """Deterministic cognitive frame selector (HARD-only stage)."""
 
@@ -256,7 +293,154 @@ class Engine:
                 undetermined_reason=None,
             )
 
-        # --- multiple allowed, no SOFT/DEFAULT yet -> UNDETERMINED ---
+                # --- multiple allowed: classifier first, then SOFT ranking ---
+
+        applicable_soft = [
+            r for r in self.rules
+            if r.priority == "SOFT" and _is_rule_applicable(r, context)
+        ]
+
+        rules_fired_soft = [
+            {"id": r.id, "priority": r.priority, "weight": r.weight}
+            for r in applicable_soft
+        ]
+        all_rules_fired = rules_fired + rules_fired_soft
+
+        # 1. Classifier acceptance inside ALLOWED
+        if classifier_proposal is not None:
+            matched = _classifier_matches_allowed(classifier_proposal, allowed)
+            if matched is not None:
+                reg, coord, strat, tier = matched
+                candidate = CognitiveFrame(
+                    register=reg, coordinate_system=coord, strategy=strat,
+                    model_tier=tier, revision=target_revision,
+                )
+                if previous_frame is not None and not frames_same_config(candidate, previous_frame):
+                    new_revision = previous_frame.revision + 1
+                else:
+                    new_revision = target_revision
+                return DecisionTrace(
+                    event="frame_selection",
+                    ruleset_hash=ruleset_h,
+                    frame_registry_hash=registry_h,
+                    input_hash=input_h,
+                    context_hash=context_h,
+                    state_hash=state_h,
+                    allowed_frames_hash=allowed_h,
+                    rules_fired=all_rules_fired,
+                    classifier={
+                        "proposal": {
+                            "register": classifier_proposal.register,
+                            "coordinate_system": classifier_proposal.coordinate_system,
+                            "strategy": classifier_proposal.strategy,
+                            "model_tier": classifier_proposal.model_tier,
+                        },
+                        "version": "stage2",
+                        "params_hash": _hash_payload({}),
+                    },
+                    conflict=False,
+                    conflict_reason="none",
+                    resolution="classifier_accepted",
+                    previous_frame=(
+                        {
+                            "register": previous_frame.register,
+                            "coordinate_system": previous_frame.coordinate_system,
+                            "strategy": previous_frame.strategy,
+                            "model_tier": previous_frame.model_tier,
+                            "revision": previous_frame.revision,
+                        }
+                        if previous_frame is not None
+                        else None
+                    ),
+                    selected_frame={
+                        "register": reg,
+                        "coordinate_system": coord,
+                        "strategy": strat,
+                        "model_tier": tier,
+                        "revision": new_revision,
+                    },
+                    revision=new_revision,
+                    undetermined_reason=None,
+                )
+
+        # 2. SOFT ranking inside ALLOWED
+        scored: list[tuple[int, tuple[str, str, str, str]]] = []
+        for entry in allowed:
+            reg, coord, strat, tier = entry
+            score = 0
+            for r in applicable_soft:
+                if _frame_satisfies_soft(reg, coord, strat, r.frame):
+                    score += r.weight  # positive int guaranteed by is_valid_rule
+            scored.append((score, entry))
+
+        if not scored:
+            # allowed non-empty, but scored empty - shouldn't happen
+            max_score = 0
+            winners: list[tuple[str, str, str, str]] = []
+        else:
+            max_score = max(s for s, _ in scored)
+            winners = [entry for s, entry in scored if s == max_score]
+
+        # 3. Unique SOFT winner
+        if len(winners) == 1:
+            reg, coord, strat, tier = winners[0]
+            candidate = CognitiveFrame(
+                register=reg, coordinate_system=coord, strategy=strat,
+                model_tier=tier, revision=target_revision,
+            )
+            if previous_frame is not None and not frames_same_config(candidate, previous_frame):
+                new_revision = previous_frame.revision + 1
+            else:
+                new_revision = target_revision
+            return DecisionTrace(
+                event="frame_selection",
+                ruleset_hash=ruleset_h,
+                frame_registry_hash=registry_h,
+                input_hash=input_h,
+                context_hash=context_h,
+                state_hash=state_h,
+                allowed_frames_hash=allowed_h,
+                rules_fired=all_rules_fired,
+                classifier=(
+                    {
+                        "proposal": {
+                            "register": classifier_proposal.register,
+                            "coordinate_system": classifier_proposal.coordinate_system,
+                            "strategy": classifier_proposal.strategy,
+                            "model_tier": classifier_proposal.model_tier,
+                        },
+                        "version": "stage2",
+                        "params_hash": _hash_payload({}),
+                    }
+                    if classifier_proposal is not None
+                    else None
+                ),
+                conflict=False,
+                conflict_reason="none",
+                resolution="soft_rule_accept",
+                previous_frame=(
+                    {
+                        "register": previous_frame.register,
+                        "coordinate_system": previous_frame.coordinate_system,
+                        "strategy": previous_frame.strategy,
+                        "model_tier": previous_frame.model_tier,
+                        "revision": previous_frame.revision,
+                    }
+                    if previous_frame is not None
+                    else None
+                ),
+                selected_frame={
+                    "register": reg,
+                    "coordinate_system": coord,
+                    "strategy": strat,
+                    "model_tier": tier,
+                    "revision": new_revision,
+                },
+                revision=new_revision,
+                undetermined_reason=None,
+            )
+
+        # 4. SOFT tie, no default yet
         return DecisionTrace(
             event="frame_undetermined",
             ruleset_hash=ruleset_h,
@@ -265,7 +449,7 @@ class Engine:
             context_hash=context_h,
             state_hash=state_h,
             allowed_frames_hash=allowed_h,
-            rules_fired=rules_fired,
+            rules_fired=all_rules_fired,
             classifier=None,
             conflict=False,
             conflict_reason="none",
@@ -283,5 +467,5 @@ class Engine:
             ),
             selected_frame=None,
             revision=target_revision,
-            undetermined_reason="multiple_allowed_no_soft_no_default",
+            undetermined_reason="soft_tie_no_default",
         )
