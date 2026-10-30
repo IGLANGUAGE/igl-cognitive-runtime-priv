@@ -26,6 +26,7 @@ from .frame import (
     VALID_TIERS,
     frame_hash,
     frame_registry_hash,
+    frames_same_config,
     is_valid_frame,
 )
 from .rules import Rule, is_valid_rule, ruleset_hash
@@ -124,6 +125,7 @@ class Engine:
     ) -> DecisionTrace:
         hard_rules = self._applicable_hard(context)
         allowed = self._allowed_frames(hard_rules)
+        target_revision = previous_frame.revision if previous_frame is not None else 0
 
         # Hashes for trace
         ruleset_h = ruleset_hash(self.rules)
@@ -157,22 +159,46 @@ class Engine:
                 conflict=True,
                 conflict_reason="hard_vs_hard",
                 resolution="none",
-                previous_frame=None,
+                previous_frame=(
+                    {
+                        "register": previous_frame.register,
+                        "coordinate_system": previous_frame.coordinate_system,
+                        "strategy": previous_frame.strategy,
+                        "model_tier": previous_frame.model_tier,
+                        "revision": previous_frame.revision,
+                    }
+                    if previous_frame is not None
+                    else None
+                ),
                 selected_frame=None,
-                revision=0,
+                revision=target_revision,
                 undetermined_reason=None,
             )
 
         # --- hard_unique: exactly one allowed frame ---
         if len(allowed) == 1:
             reg, coord, strat, tier = allowed[0]
+            candidate = CognitiveFrame(
+                register=reg,
+                coordinate_system=coord,
+                strategy=strat,
+                model_tier=tier,
+                revision=target_revision,
+            )
+
+            if previous_frame is not None and not frames_same_config(candidate, previous_frame):
+                new_revision = previous_frame.revision + 1
+            else:
+                new_revision = target_revision
+
             selected = CognitiveFrame(
                 register=reg,
                 coordinate_system=coord,
                 strategy=strat,
                 model_tier=tier,
-                revision=0,
+                revision=new_revision,
             )
+
             classifier_differs = (
                 classifier_proposal is not None
                 and not (
@@ -208,15 +234,25 @@ class Engine:
                 conflict=classifier_differs,
                 conflict_reason="hard_vs_classifier" if classifier_differs else "none",
                 resolution="hard_unique",
-                previous_frame=None,
+                previous_frame=(
+                    {
+                        "register": previous_frame.register,
+                        "coordinate_system": previous_frame.coordinate_system,
+                        "strategy": previous_frame.strategy,
+                        "model_tier": previous_frame.model_tier,
+                        "revision": previous_frame.revision,
+                    } 
+                    if previous_frame is not None
+                    else None
+                ),
                 selected_frame={
                     "register": reg,
                     "coordinate_system": coord,
                     "strategy": strat,
                     "model_tier": tier,
-                    "revision": 0,
+                    "revision": new_revision,
                 },
-                revision=0,
+                revision=new_revision,
                 undetermined_reason=None,
             )
 
@@ -234,8 +270,18 @@ class Engine:
             conflict=False,
             conflict_reason="none",
             resolution="none",
-            previous_frame=None,
+            previous_frame=(
+                {
+                    "register": previous_frame.register,
+                    "coordinate_system": previous_frame.coordinate_system,
+                    "strategy": previous_frame.strategy,
+                    "model_tier": previous_frame.model_tier,
+                    "revision": previous_frame.revision,
+                }
+                if previous_frame is not None
+                else None
+            ),
             selected_frame=None,
-            revision=0,
+            revision=target_revision,
             undetermined_reason="multiple_allowed_no_soft_no_default",
         )

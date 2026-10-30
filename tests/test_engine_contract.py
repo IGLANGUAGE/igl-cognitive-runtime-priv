@@ -274,3 +274,85 @@ def test_t17_classifier_tier_below_min_rejected():
     # The classifier proposal is recorded as-is, not rewritten
     assert trace.classifier is not None
     assert trace.classifier["proposal"]["model_tier"] == "small"
+
+
+# --- T8: revision does not grow when configuration is unchanged ---
+
+def test_t8_revision_unchanged_when_same_config():
+    """T8: previous_frame == selected config; revision must stay the same.
+
+    previous_frame: verification/mathematics/formal_verification/strong, revision=1
+    HARD requires the same config.
+    Expected: selected revision = 1 (not 2).
+    """
+    engine = Engine(rules=[hard_math_strong()])
+    context = {"hard_math_strong": True}
+
+    previous = CognitiveFrame(
+        register="verification",
+        coordinate_system="mathematics",
+        strategy="formal_verification",
+        model_tier="strong",
+        revision=1,
+    )
+
+    trace = engine.select(context=context, classifier_proposal=None, previous_frame=previous)
+
+    assert trace.event == "frame_selection"
+    assert trace.resolution == "hard_unique"
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["revision"] == 1
+    assert trace.revision == 1
+
+
+# --- T9: revision grows when configuration changes ---
+
+def test_t9_revision_grows_on_config_change():
+    """T9: previous_frame config differs; revision increments by 1.
+
+    previous_frame: hypothesis/philosophy/conceptual_exploration/medium, revision=0
+    HARD requires verification/mathematics/formal_verification/strong.
+    Expected: selected revision = 1.
+    """
+    engine = Engine(rules=[hard_math_strong()])
+    context = {"hard_math_strong": True}
+
+    previous = CognitiveFrame(
+        register="hypothesis",
+        coordinate_system="philosophy",
+        strategy="conceptual_exploration",
+        model_tier="medium",
+        revision=0,
+    )
+
+    trace = engine.select(context=context, classifier_proposal=None, previous_frame=previous)
+
+    assert trace.event == "frame_selection"
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["revision"] == 1
+    assert trace.revision == 1
+
+
+# --- T3/T13 revisited: conflict does not grow revision ---
+
+def test_t3_conflict_does_not_grow_revision():
+    """Conflict: previous_frame revision unchanged; selected_frame is None."""
+    engine = Engine(rules=[hard_math_verification(), hard_conversation()])
+    context = {
+        "explicit_math_verification": True,
+        "force_conversation": True,
+    }
+    previous = CognitiveFrame(
+        register="conversation",
+        coordinate_system="none",
+        strategy="conceptual_exploration",
+        model_tier="small",
+        revision=5,
+    )
+
+    trace = engine.select(context=context, classifier_proposal=None, previous_frame=previous)
+
+    assert trace.event == "frame_conflict"
+    assert trace.selected_frame is None
+    # revision field in trace mirrors previous.revision when no new frame selected
+    assert trace.revision == 5
