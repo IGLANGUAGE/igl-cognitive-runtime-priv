@@ -1,0 +1,241 @@
+"""Cognitive Engine — deterministic CognitiveFrame selection (CE.1-r3).
+
+First implementation stage: HARD rules only.
+Covers contract tests T1, T3, T13.
+
+Not yet implemented (later stages):
+  - SOFT ranking
+  - classifier acceptance inside ALLOWED
+  - DEFAULT_SAFE_FRAME
+  - revision increments
+  - min_model_tier combination beyond simple max
+  - T4, T5a/b, T6, T7, T8, T9, T10, T11, T12, T14, T15, T16, T17, T18
+
+Engine does NOT call LLM, does NOT access memory, does NOT do I/O.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+from .frame import (
+    CognitiveFrame,
+    VALID_FRAMES,
+    VALID_TIERS,
+    frame_hash,
+    frame_registry_hash,
+    is_valid_frame,
+)
+from .rules import Rule, is_valid_rule, ruleset_hash
+from .trace import CONTRACT_VERSION, DecisionTrace
+
+
+_TIER_RANK: dict[str, int] = {"small": 0, "medium": 1, "strong": 2}
+
+
+def _canonical_json(obj: Any) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _hash_payload(obj: Any) -> str:
+    return hashlib.sha256(_canonical_json(obj).encode("utf-8")).hexdigest()
+
+
+def _is_rule_applicable(rule: Rule, context: dict) -> bool:
+    """Condition semantics (stage 1): rule applies iff context[rule.condition] is True."""
+    return context.get(rule.condition) is True
+
+
+def _triple_satisfies(
+    triple: tuple[str, str, str],
+    partial_frame: dict[str, str],
+) -> bool:
+    """Does the (register, coordinate_system, strategy) triple satisfy the partial frame?"""
+    register, coord, strategy = triple
+    value_by_field = {
+        "register": register,
+        "coordinate_system": coord,
+        "strategy": strategy,
+    }
+    for field, expected in partial_frame.items():
+        if field in value_by_field and value_by_field[field] != expected:
+            return False
+    return True
+
+
+def _tier_satisfies(tier: str, min_tier: str | None) -> bool:
+    if min_tier is None:
+        return True
+    return _TIER_RANK.get(tier, -1) >= _TIER_RANK.get(min_tier, 999)
+
+
+class Engine:
+    """Deterministic cognitive frame selector (HARD-only stage)."""
+
+    def __init__(
+        self,
+        rules: list[Rule],
+        default_frame: CognitiveFrame | None = None,
+    ) -> None:
+        for rule in rules:
+            if not is_valid_rule(rule):
+                raise ValueError(f"Invalid rule: {rule.id!r}")
+        if default_frame is not None and not is_valid_frame(default_frame):
+            raise ValueError("Invalid default_frame")
+
+        self.rules = list(rules)
+        self.default_frame = default_frame
+
+    # --- ALLOWED computation ---
+
+    def _applicable_hard(self, context: dict) -> list[Rule]:
+        return [
+            r for r in self.rules
+            if r.priority == "HARD" and _is_rule_applicable(r, context)
+        ]
+
+    def _allowed_frames(self, hard_rules: list[Rule]) -> list[tuple[str, str, str, str]]:
+        """Return list of (register, coord, strategy, tier) allowed by all HARD rules."""
+        # Combined min tier from applicable HARD rules
+        combined_min: str | None = None
+        for r in hard_rules:
+            if r.min_model_tier is not None:
+                if combined_min is None or _TIER_RANK[r.min_model_tier] > _TIER_RANK[combined_min]:
+                    combined_min = r.min_model_tier
+
+        allowed: list[tuple[str, str, str, str]] = []
+        for triple in sorted(VALID_FRAMES):
+            if not all(_triple_satisfies(triple, r.frame) for r in hard_rules):
+                continue
+            for tier in sorted(VALID_TIERS, key=lambda t: _TIER_RANK[t]):
+                if _tier_satisfies(tier, combined_min):
+                    allowed.append((triple[0], triple[1], triple[2], tier))
+        return allowed
+
+    # --- select ---
+
+    def select(
+        self,
+        context: dict,
+        classifier_proposal: CognitiveFrame | None = None,
+        previous_frame: CognitiveFrame | None = None,
+    ) -> DecisionTrace:
+        hard_rules = self._applicable_hard(context)
+        allowed = self._allowed_frames(hard_rules)
+
+        # Hashes for trace
+        ruleset_h = ruleset_hash(self.rules)
+        registry_h = frame_registry_hash()
+        input_h = _hash_payload({"context": context})
+        context_h = _hash_payload({"context": context})
+        state_h = _hash_payload({
+            "previous_frame": (
+                frame_hash(previous_frame) if previous_frame is not None else None
+            )
+        })
+        allowed_h = _hash_payload({"allowed": allowed})
+
+        rules_fired = [
+            {"id": r.id, "priority": r.priority, "weight": r.weight}
+            for r in hard_rules
+        ]
+
+        # --- FRAME_CONFLICT: no allowed frames ---
+        if not allowed:
+            return DecisionTrace(
+                event="frame_conflict",
+                ruleset_hash=ruleset_h,
+                frame_registry_hash=registry_h,
+                input_hash=input_h,
+                context_hash=context_h,
+                state_hash=state_h,
+                allowed_frames_hash=allowed_h,
+                rules_fired=rules_fired,
+                classifier=None,
+                conflict=True,
+                conflict_reason="hard_vs_hard",
+                resolution="none",
+                previous_frame=None,
+                selected_frame=None,
+                revision=0,
+                undetermined_reason=None,
+            )
+
+        # --- hard_unique: exactly one allowed frame ---
+        if len(allowed) == 1:
+            reg, coord, strat, tier = allowed[0]
+            selected = CognitiveFrame(
+                register=reg,
+                coordinate_system=coord,
+                strategy=strat,
+                model_tier=tier,
+                revision=0,
+            )
+            classifier_differs = (
+                classifier_proposal is not None
+                and not (
+                    classifier_proposal.register == reg
+                    and classifier_proposal.coordinate_system == coord
+                    and classifier_proposal.strategy == strat
+                    and classifier_proposal.model_tier == tier
+                )
+            )
+            return DecisionTrace(
+                event="frame_selection",
+                ruleset_hash=ruleset_h,
+                frame_registry_hash=registry_h,
+                input_hash=input_h,
+                context_hash=context_h,
+                state_hash=state_h,
+                allowed_frames_hash=allowed_h,
+                rules_fired=rules_fired,
+                classifier=(
+                    {
+                        "proposal": {
+                            "register": classifier_proposal.register,
+                            "coordinate_system": classifier_proposal.coordinate_system,
+                            "strategy": classifier_proposal.strategy,
+                            "model_tier": classifier_proposal.model_tier,
+                        },
+                        "version": "stage1",
+                        "params_hash": _hash_payload({}),
+                    }
+                    if classifier_proposal is not None
+                    else None
+                ),
+                conflict=classifier_differs,
+                conflict_reason="hard_vs_classifier" if classifier_differs else "none",
+                resolution="hard_unique",
+                previous_frame=None,
+                selected_frame={
+                    "register": reg,
+                    "coordinate_system": coord,
+                    "strategy": strat,
+                    "model_tier": tier,
+                    "revision": 0,
+                },
+                revision=0,
+                undetermined_reason=None,
+            )
+
+        # --- multiple allowed, no SOFT/DEFAULT yet -> UNDETERMINED ---
+        return DecisionTrace(
+            event="frame_undetermined",
+            ruleset_hash=ruleset_h,
+            frame_registry_hash=registry_h,
+            input_hash=input_h,
+            context_hash=context_h,
+            state_hash=state_h,
+            allowed_frames_hash=allowed_h,
+            rules_fired=rules_fired,
+            classifier=None,
+            conflict=False,
+            conflict_reason="none",
+            resolution="none",
+            previous_frame=None,
+            selected_frame=None,
+            revision=0,
+            undetermined_reason="multiple_allowed_no_soft_no_default",
+        )
