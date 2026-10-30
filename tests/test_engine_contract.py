@@ -170,3 +170,107 @@ def test_t13_hidden_hard_incompatibility():
     assert trace.selected_frame is None
     assert trace.conflict_reason == "hard_vs_hard"
     assert trace.resolution == "none"
+
+
+# --- T4: two HARD with min_model_tier, combined to strictest ---
+
+def hard_math_strong() -> Rule:
+    return Rule(
+        id="HARD_MATH_STRONG",
+        priority="HARD",
+        condition="hard_math_strong",
+        frame={
+            "register": "verification",
+            "coordinate_system": "mathematics",
+        },
+        scope="math",
+        weight=None,
+        min_model_tier="strong",
+    )
+
+
+def hard_math_medium() -> Rule:
+    return Rule(
+        id="HARD_MATH_MEDIUM",
+        priority="HARD",
+        condition="hard_math_medium",
+        frame={
+            "register": "verification",
+            "coordinate_system": "mathematics",
+        },
+        scope="math",
+        weight=None,
+        min_model_tier="medium",
+    )
+
+
+def test_t4_two_hard_min_tier_combined_to_strictest():
+    """T4: two HARD rules with min_model_tier strong and medium.
+
+    Expected:
+      SELECTED
+      register = verification
+      coordinate_system = mathematics
+      strategy = formal_verification
+      model_tier = strong       (max of lower bounds)
+      resolution = hard_unique
+    """
+    engine = Engine(rules=[hard_math_strong(), hard_math_medium()])
+    context = {
+        "hard_math_strong": True,
+        "hard_math_medium": True,
+    }
+
+    trace = engine.select(context=context, classifier_proposal=None, previous_frame=None)
+
+    assert trace.event == "frame_selection"
+    assert trace.resolution == "hard_unique"
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["register"] == "verification"
+    assert trace.selected_frame["coordinate_system"] == "mathematics"
+    assert trace.selected_frame["strategy"] == "formal_verification"
+    assert trace.selected_frame["model_tier"] == "strong"
+
+
+# --- T17: classifier proposes tier below min_model_tier ---
+
+def test_t17_classifier_tier_below_min_rejected():
+    """T17: HARD requires min_model_tier=strong. Classifier proposes small.
+
+    Expected:
+      SELECTED
+      model_tier = strong       (from ALLOWED, not from classifier)
+      conflict = True
+      conflict_reason = hard_vs_classifier
+      resolution = hard_unique
+
+    The classifier's proposal must NOT be silently upgraded.
+    It must be recorded as a rejected proposal.
+    """
+    engine = Engine(rules=[hard_math_strong()])
+    context = {"hard_math_strong": True}
+
+    classifier = CognitiveFrame(
+        register="verification",
+        coordinate_system="mathematics",
+        strategy="formal_verification",
+        model_tier="small",
+        revision=0,
+    )
+
+    trace = engine.select(
+        context=context,
+        classifier_proposal=classifier,
+        previous_frame=None,
+    )
+
+    assert trace.event == "frame_selection"
+    assert trace.resolution == "hard_unique"
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["model_tier"] == "strong"
+    assert trace.conflict is True
+    assert trace.conflict_reason == "hard_vs_classifier"
+
+    # The classifier proposal is recorded as-is, not rewritten
+    assert trace.classifier is not None
+    assert trace.classifier["proposal"]["model_tier"] == "small"
