@@ -918,3 +918,131 @@ def test_debug_memory_rule_fires():
     print("resolved:", _resolve_condition(rule.condition, effective))
     print("applicable:", _is_rule_applicable(rule, effective))
     assert _is_rule_applicable(rule, effective) is True
+
+
+# ============================================================
+# CE.2.3: Two Johns (mock memory)
+# ============================================================
+
+def memory_math_rule() -> Rule:
+    return Rule(
+        id="MEMORY_MATH",
+        priority="HARD",
+        condition="memory.preferred_reasoning_math",
+        frame={
+            "register": "hypothesis",
+            "coordinate_system": "mathematics",
+            "strategy": "formal_derivation",
+        },
+        scope="memory",
+        weight=None,
+        min_model_tier="strong",
+    )
+
+
+def memory_philosophy_rule() -> Rule:
+    return Rule(
+        id="MEMORY_PHILOSOPHY",
+        priority="HARD",
+        condition="memory.preferred_reasoning_philosophy",
+        frame={
+            "register": "hypothesis",
+            "coordinate_system": "philosophy",
+            "strategy": "conceptual_exploration",
+        },
+        scope="memory",
+        weight=None,
+        min_model_tier="strong",
+    )
+
+
+def two_johns_engine() -> Engine:
+    return Engine(rules=[memory_math_rule(), memory_philosophy_rule()])
+
+
+def test_j1_different_memory_different_frames():
+    """J1: different allowed memory -> different frames, same engine, no classifier."""
+    engine = two_johns_engine()
+    user_context = {}
+
+    john_a = engine.select(
+        context=user_context,
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context={"preferred_reasoning_math": True},
+    )
+    john_b = engine.select(
+        context=user_context,
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context={"preferred_reasoning_philosophy": True},
+    )
+
+    assert john_a.event == "frame_selection"
+    assert john_a.resolution == "hard_unique"
+    assert john_a.selected_frame["register"] == "hypothesis"
+    assert john_a.selected_frame["coordinate_system"] == "mathematics"
+    assert john_a.selected_frame["strategy"] == "formal_derivation"
+    assert john_a.selected_frame["model_tier"] == "strong"
+
+    assert john_b.event == "frame_selection"
+    assert john_b.resolution == "hard_unique"
+    assert john_b.selected_frame["register"] == "hypothesis"
+    assert john_b.selected_frame["coordinate_system"] == "philosophy"
+    assert john_b.selected_frame["strategy"] == "conceptual_exploration"
+    assert john_b.selected_frame["model_tier"] == "strong"
+
+    assert john_a.selected_frame != john_b.selected_frame
+
+
+def test_j2_same_memory_same_frame():
+    """J2: identical memory -> identical frames."""
+    engine = two_johns_engine()
+    memory = {"preferred_reasoning_math": True}
+
+    a = engine.select(context={}, classifier_proposal=None, previous_frame=None, memory_context=memory)
+    b = engine.select(context={}, classifier_proposal=None, previous_frame=None, memory_context=memory)
+
+    assert a.selected_frame == b.selected_frame
+    assert a.event == b.event
+    assert a.resolution == b.resolution
+
+
+def test_j3_memory_removed_no_dependency():
+    """J3: after memory removed, math rule does not fire."""
+    engine = two_johns_engine()
+
+    before = engine.select(
+        context={},
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context={"preferred_reasoning_math": True},
+    )
+    assert before.event == "frame_selection"
+
+    after = engine.select(
+        context={},
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context={},
+    )
+    # Math rule no longer fires. No other HARD/SOFT/DEFAULT -> UNDETERMINED.
+    assert after.event == "frame_undetermined"
+    assert after.selected_frame is None
+    fired_ids = [r["id"] for r in after.rules_fired]
+    assert "MEMORY_MATH" not in fired_ids
+
+
+def test_j4_deterministic_replay():
+    """J4: same fixed inputs -> identical selected_frame and identical trace_hash."""
+    from igl_cognitive.trace import trace_hash
+
+    engine = two_johns_engine()
+    memory = {"preferred_reasoning_math": True}
+
+    t1 = engine.select(context={}, classifier_proposal=None, previous_frame=None, memory_context=memory)
+    t2 = engine.select(context={}, classifier_proposal=None, previous_frame=None, memory_context=memory)
+
+    assert t1.selected_frame == t2.selected_frame
+    assert t1.revision == t2.revision
+    assert trace_hash(t1) == trace_hash(t2)
