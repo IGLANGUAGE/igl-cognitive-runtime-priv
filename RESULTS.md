@@ -4,7 +4,12 @@
 
 | Suite | Tests | Status |
 |---|---|---|
-| Unit (contract, adapter, mock Johns) | 100 | passed |
+| Unit (contract, adapter, mock Johns) | 99 | passed |
+| Unit (predicates P1–P5, NL P6a–P6e) | 20 | passed |
+| Live (IGL, L1–L4) | 4 | passed |
+| Live (Two Johns, JL1–JL4) | 4 | passed |
+| **Total unit** | **119** | **passed** |
+| **Total live** | **8** | **passed** |
 | Live (IGL, L1–L4) | 4 | passed |
 | Live (Two Johns, JL1–JL4) | 4 | passed |
 | **Total live** | **8** | **passed** |
@@ -20,6 +25,11 @@ Live tests require a running IGL Memory server and valid user tokens.
 | CE.2.2 | Live IGL: record, correction, reject, forget → Gate → Adapter → Engine |
 | CE.2.3 (mock) | Two Johns on mock memory: different memory → different frames |
 | CE.2.3-live | Two Johns on real IGL: different users → different frames, same users → same frame, forget removes dependency, deterministic replay |
+| CE.3.1 | PredicateRegistry (immutable, namespaced) |
+| CE.3.2 | Predicate evaluation in Engine, fail-closed HARD |
+| CE.3.3 | Natural-language frame selection (P6a-P6e) |
+
+Deterministic predicates can recognise predefined language patterns in user text and select a CognitiveFrame without a flat flag and without an LLM. This is pattern matching, not general NLU.
 
 ### Main experimental claim
 

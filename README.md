@@ -30,6 +30,7 @@ The frame selection is:
 - **DecisionTrace** — structured event: fired rules, classifier proposal,
   conflict, resolution, previous/selected frame, revision, hashes.
   No plaintext user input, no secrets.
+- **PredicateRegistry** — immutable registry of deterministic predicates.
 
 ## What this is not
 
@@ -49,8 +50,9 @@ The frame selection is:
 | CE.2.2 | Live IGL: correction / reject / forget → Gate → Engine |
 | CE.2.3 (mock) | Different memory → different frames (mock) |
 | CE.2.3-live | Two real IGL users → different frames (JL1–JL4) |
+| CE.3 | Predicate evaluation, natural-language frame selection |
 
-Tests: **100 unit passed, 8 live passed** (requires a running IGL server
+Tests: **119 unit passed, 8 live passed** (requires a running IGL server
 and `IGL_USER_TOKEN_A` / `IGL_USER_TOKEN_B`).
 
 See `CONTRACT.md` for the full contract and `RESULTS.md` for what was
