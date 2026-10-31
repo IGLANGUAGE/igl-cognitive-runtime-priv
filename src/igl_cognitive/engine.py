@@ -33,6 +33,16 @@ from .rules import Rule, is_valid_rule, ruleset_hash
 from .trace import CONTRACT_VERSION, DecisionTrace
 
 
+_RESERVED_MEMORY_KEY = "memory"
+
+
+class GateUnavailableError(RuntimeError):
+    """Raised when memory adapter cannot obtain Gate context.
+
+    Fail-closed: Engine must NOT proceed with cached/empty memory.
+    """
+
+
 _TIER_RANK: dict[str, int] = {"small": 0, "medium": 1, "strong": 2}
 
 
@@ -44,9 +54,26 @@ def _hash_payload(obj: Any) -> str:
     return hashlib.sha256(_canonical_json(obj).encode("utf-8")).hexdigest()
 
 
-def _is_rule_applicable(rule: Rule, context: dict) -> bool:
-    """Condition semantics (stage 1): rule applies iff context[rule.condition] is True."""
-    return context.get(rule.condition) is True
+def _resolve_condition(condition: str, effective_context: dict):
+    """Resolve a rule condition against effective_context.
+
+    Supported forms:
+      "explicit_math_verification"        -> effective_context["explicit_math_verification"]
+      "memory.preferred_reasoning"        -> effective_context["memory"]["preferred_reasoning"]
+    Returns the value, or None if missing.
+    """
+    if condition.startswith("memory."):
+        key = condition[len("memory."):]
+        mem = effective_context.get("memory", {})
+        if isinstance(mem, dict):
+            return mem.get(key)
+        return None
+    return effective_context.get(condition)
+
+
+def _is_rule_applicable(rule: Rule, effective_context: dict) -> bool:
+    """Rule applies iff resolved condition is True."""
+    return _resolve_condition(rule.condition, effective_context) is True
 
 
 def _triple_satisfies(
@@ -159,8 +186,31 @@ class Engine:
         context: dict,
         classifier_proposal: CognitiveFrame | None = None,
         previous_frame: CognitiveFrame | None = None,
+        memory_context: dict | None = None,
+        allowed_memory_ref: str | None = None,
+        gate_available: bool = True,
     ) -> DecisionTrace:
-        hard_rules = self._applicable_hard(context)
+        # Fail-closed: if Gate unavailable, refuse to proceed.
+        if not gate_available:
+            raise GateUnavailableError(
+                "Gate context unavailable; refusing to select frame with cached memory"
+            )
+
+        # Reserved key check: user context must not contain "memory".
+        if _RESERVED_MEMORY_KEY in context:
+            raise ValueError(
+                f"Reserved key {_RESERVED_MEMORY_KEY!r} in user context"
+            )
+
+        # Build effective context: user context + memory namespace.
+        effective_context: dict = dict(context)
+        effective_context[_RESERVED_MEMORY_KEY] = dict(memory_context or {})
+        
+        # All rule conditions see effective_context.
+        # Memory-conditioned rules use condition path "memory.preferred_reasoning"
+        # through a dedicated resolver below.
+        hard_rules = self._applicable_hard(effective_context)
+        
         allowed = self._allowed_frames(hard_rules)
         target_revision = previous_frame.revision if previous_frame is not None else 0
 
@@ -168,7 +218,10 @@ class Engine:
         ruleset_h = ruleset_hash(self.rules)
         registry_h = frame_registry_hash()
         input_h = _hash_payload({"context": context})
-        context_h = _hash_payload({"context": context})
+        context_h = _hash_payload({
+            "user_context": context,
+            "memory_context": memory_context or {},
+        })
         state_h = _hash_payload({
             "previous_frame": (
                 frame_hash(previous_frame) if previous_frame is not None else None
@@ -191,6 +244,7 @@ class Engine:
                 context_hash=context_h,
                 state_hash=state_h,
                 allowed_frames_hash=allowed_h,
+                allowed_memory_ref=allowed_memory_ref,
                 rules_fired=rules_fired,
                 classifier=None,
                 conflict=True,
@@ -253,6 +307,7 @@ class Engine:
                 context_hash=context_h,
                 state_hash=state_h,
                 allowed_frames_hash=allowed_h,
+                allowed_memory_ref=allowed_memory_ref,
                 rules_fired=rules_fired,
                 classifier=(
                     {
@@ -297,7 +352,7 @@ class Engine:
 
         applicable_soft = [
             r for r in self.rules
-            if r.priority == "SOFT" and _is_rule_applicable(r, context)
+            if r.priority == "SOFT" and _is_rule_applicable(r, effective_context)
         ]
 
         rules_fired_soft = [
@@ -327,6 +382,7 @@ class Engine:
                     context_hash=context_h,
                     state_hash=state_h,
                     allowed_frames_hash=allowed_h,
+                    allowed_memory_ref=allowed_memory_ref,
                     rules_fired=all_rules_fired,
                     classifier={
                         "proposal": {
@@ -400,6 +456,7 @@ class Engine:
                 context_hash=context_h,
                 state_hash=state_h,
                 allowed_frames_hash=allowed_h,
+                allowed_memory_ref=allowed_memory_ref,
                 rules_fired=all_rules_fired,
                 classifier=(
                     {
@@ -467,6 +524,7 @@ class Engine:
                     context_hash=context_h,
                     state_hash=state_h,
                     allowed_frames_hash=allowed_h,
+                    allowed_memory_ref=allowed_memory_ref,
                     rules_fired=all_rules_fired,
                     classifier=(
                         {
@@ -521,6 +579,7 @@ class Engine:
             context_hash=context_h,
             state_hash=state_h,
             allowed_frames_hash=allowed_h,
+            allowed_memory_ref=allowed_memory_ref,
             rules_fired=all_rules_fired,
             classifier=None,
             conflict=False,

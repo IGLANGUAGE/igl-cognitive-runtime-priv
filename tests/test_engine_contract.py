@@ -742,3 +742,179 @@ def test_t15_rule_order_does_not_affect_result():
     assert t_a.event == t_b.event
     assert t_a.resolution == t_b.resolution
     assert ruleset_hash(rules_a) == ruleset_hash(rules_b)
+
+
+# ============================================================
+# CE.2.1b: Adapter -> Engine bridge (mock memory)
+# ============================================================
+
+def memory_rule_math() -> Rule:
+    """HARD rule activated by memory.has_math_preference == True.
+
+    Full triple + strong tier -> ALLOWED = 1 frame -> hard_unique.
+    """
+    return Rule(
+        id="MEMORY_MATH_PREF",
+        priority="HARD",
+        condition="memory.has_math_preference",
+        frame={
+            "register": "hypothesis",
+            "coordinate_system": "mathematics",
+            "strategy": "formal_derivation",
+        },
+        scope="memory_math",
+        weight=None,
+        min_model_tier="strong",
+    )
+
+
+# --- B1: no memory -> CE.1 behavior unchanged ---
+
+def test_b1_no_memory_unchanged():
+    engine = Engine(rules=[hard_math_strong()])
+    context = {"hard_math_strong": True}
+    trace = engine.select(context=context, classifier_proposal=None, previous_frame=None)
+    assert trace.event == "frame_selection"
+    assert trace.resolution == "hard_unique"
+    assert trace.allowed_memory_ref is None
+
+
+# --- B2: memory influences frame selection ---
+
+def test_b2_memory_influences_selection():
+    engine = Engine(rules=[memory_rule_math()])
+    user_context = {}  # no user condition
+    memory_context={"has_math_preference": True}
+
+    trace = engine.select(
+        context=user_context,
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context=memory_context,
+    )
+
+    assert trace.event == "frame_selection"
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["register"] == "hypothesis"
+    assert trace.selected_frame["coordinate_system"] == "mathematics"
+
+
+# --- B3: allowed_memory_ref in trace ---
+
+def test_b3_allowed_memory_ref_in_trace():
+    engine = Engine(rules=[memory_rule_math()])
+    trace = engine.select(
+        context={},
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context={"has_math_preference": True},
+        allowed_memory_ref="abc123",
+    )
+    assert trace.allowed_memory_ref == "abc123"
+
+
+# --- B4: withheld/constraints not in Engine context ---
+
+def test_b4_withheld_not_in_context():
+    """withheld and constraints are adapter diagnostics, not Engine input."""
+    engine = Engine(rules=[memory_rule_math()])
+    # memory_context empty: withheld items not passed
+    trace = engine.select(
+        context={},
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context={},
+    )
+    # Without memory_context, the memory rule does not fire.
+    assert trace.event == "frame_undetermined" or trace.selected_frame != {
+        "register": "hypothesis",
+        "coordinate_system": "mathematics",
+        "strategy": "formal_derivation",
+        "model_tier": "medium",
+        "revision": 0,
+    }
+
+
+# --- B5: after forget, memory no longer influences selection ---
+
+def test_b5_after_forget_no_dependency():
+    engine = Engine(rules=[memory_rule_math()])
+
+    # Before: memory present
+    before = engine.select(
+        context={},
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context={"has_math_preference": True},
+        allowed_memory_ref="ref-before",
+    )
+    assert before.selected_frame is not None
+    assert before.selected_frame["coordinate_system"] == "mathematics"
+
+    # After: memory forgotten (empty)
+    after = engine.select(
+        context={},
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context={},
+        allowed_memory_ref="ref-after",
+    )
+    # The memory rule no longer fires; frame is not the memory-conditioned one.
+    assert after.allowed_memory_ref == "ref-after"
+    # Either undetermined, or a frame that is NOT driven by memory rule.
+    if after.selected_frame is not None:
+        assert after.selected_frame["coordinate_system"] != "mathematics" or \
+               after.resolution != "hard_unique"
+
+
+# --- B6: memory cannot override user context ---
+
+def test_b6_memory_cannot_override_user_context():
+    """Memory in namespace 'memory' does not override user condition."""
+    engine = Engine(rules=[hard_math_strong()])
+    user_context = {"hard_math_strong": True}
+    memory_context = {"hard_math_strong": False}  # attempts to disable
+
+    trace = engine.select(
+        context=user_context,
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context=memory_context,
+    )
+    # HARD rule from user context still fires.
+    assert trace.event == "frame_selection"
+    assert trace.selected_frame["model_tier"] == "strong"
+
+
+def test_b6_reserved_key_in_user_context_rejected():
+    engine = Engine(rules=[])
+    with pytest.raises(ValueError):
+        engine.select(
+            context={"memory": {"x": 1}},
+            classifier_proposal=None,
+            previous_frame=None,
+        )
+
+
+# --- B7: gate unavailable is not empty memory ---
+
+def test_b7_gate_unavailable_raises():
+    from igl_cognitive.engine import GateUnavailableError
+    engine = Engine(rules=[])
+    with pytest.raises(GateUnavailableError):
+        engine.select(
+            context={},
+            classifier_proposal=None,
+            previous_frame=None,
+            gate_available=False,
+        )
+
+
+def test_debug_memory_rule_fires():
+    from igl_cognitive.engine import _is_rule_applicable, _resolve_condition
+    rule = memory_rule_math()
+    effective = {"memory": {"has_math_preference": True}}
+    print("condition:", rule.condition)
+    print("resolved:", _resolve_condition(rule.condition, effective))
+    print("applicable:", _is_rule_applicable(rule, effective))
+    assert _is_rule_applicable(rule, effective) is True
