@@ -77,4 +77,7 @@ def split_condition(condition: str) -> tuple[str, str]:
         return "flag", condition[len(FLAG_PREFIX):]
     if condition.startswith(MEMORY_PREFIX):
         return "memory", condition[len(MEMORY_PREFIX):]
+    # Legacy memory form (CE.2.1b): "memory.<key>" without colon
+    if condition.startswith("memory."):
+        return "memory", condition[len("memory."):]
     return "legacy", condition

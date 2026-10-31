@@ -910,15 +910,6 @@ def test_b7_gate_unavailable_raises():
         )
 
 
-def test_debug_memory_rule_fires():
-    from igl_cognitive.engine import _is_rule_applicable, _resolve_condition
-    rule = memory_rule_math()
-    effective = {"memory": {"has_math_preference": True}}
-    print("condition:", rule.condition)
-    print("resolved:", _resolve_condition(rule.condition, effective))
-    print("applicable:", _is_rule_applicable(rule, effective))
-    assert _is_rule_applicable(rule, effective) is True
-
 
 # ============================================================
 # CE.2.3: Two Johns (mock memory)

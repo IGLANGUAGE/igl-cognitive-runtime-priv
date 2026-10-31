@@ -31,6 +31,7 @@ from .frame import (
 )
 from .rules import Rule, is_valid_rule, ruleset_hash
 from .trace import CONTRACT_VERSION, DecisionTrace
+from .predicates import PredicateRegistry, split_condition
 
 
 _RESERVED_MEMORY_KEY = "memory"
@@ -54,26 +55,54 @@ def _hash_payload(obj: Any) -> str:
     return hashlib.sha256(_canonical_json(obj).encode("utf-8")).hexdigest()
 
 
-def _resolve_condition(condition: str, effective_context: dict):
-    """Resolve a rule condition against effective_context.
+def _resolve_condition(
+    condition: str,
+    effective_context: dict,
+    registry: PredicateRegistry,
+) -> tuple[bool, dict | None]:
+    """Resolve condition. Returns (applicable, predicate_event_or_None).
 
-    Supported forms:
-      "explicit_math_verification"        -> effective_context["explicit_math_verification"]
-      "memory.preferred_reasoning"        -> effective_context["memory"]["preferred_reasoning"]
-    Returns the value, or None if missing.
+    predicate_event: {"name", "version", "result", "error"} if predicate called.
     """
-    if condition.startswith("memory."):
-        key = condition[len("memory."):]
+    ns, name = split_condition(condition)
+
+    if ns == "predicate":
+        version, fn = registry.get(name)
+        try:
+            result = fn(effective_context)
+            if not isinstance(result, bool):
+                # Treat non-bool as evaluation failure
+                return False, {
+                    "name": name,
+                    "version": version,
+                    "result": None,
+                    "error": "PREDICATE_EVALUATION_FAILED",
+                }
+            return result, {
+                "name": name,
+                "version": version,
+                "result": result,
+                "error": None,
+            }
+        except Exception:
+            return False, {
+                "name": name,
+                "version": version,
+                "result": None,
+                "error": "PREDICATE_EVALUATION_FAILED",
+            }
+
+    if ns == "flag":
+        return (effective_context.get(name) is True), None
+
+    if ns == "memory":
         mem = effective_context.get("memory", {})
         if isinstance(mem, dict):
-            return mem.get(key)
-        return None
-    return effective_context.get(condition)
+            return (mem.get(name) is True), None
+        return False, None
 
-
-def _is_rule_applicable(rule: Rule, effective_context: dict) -> bool:
-    """Rule applies iff resolved condition is True."""
-    return _resolve_condition(rule.condition, effective_context) is True
+    # legacy: flat flag
+    return (effective_context.get(condition) is True), None
 
 
 def _triple_satisfies(
@@ -143,6 +172,7 @@ class Engine:
         self,
         rules: list[Rule],
         default_frame: CognitiveFrame | None = None,
+        predicate_registry: PredicateRegistry | None = None,
     ) -> None:
         for rule in rules:
             if not is_valid_rule(rule):
@@ -152,14 +182,38 @@ class Engine:
 
         self.rules = list(rules)
         self.default_frame = default_frame
+        self.predicate_registry = predicate_registry or PredicateRegistry({})
+
+        # Validate predicate:* conditions exist in registry
+        for rule in self.rules:
+            ns, name = split_condition(rule.condition)
+            if ns == "predicate" and not self.predicate_registry.has(name):
+                raise ValueError(
+                    f"Unknown predicate {name!r} in rule {rule.id!r}"
+                )
 
     # --- ALLOWED computation ---
 
-    def _applicable_hard(self, context: dict) -> list[Rule]:
-        return [
-            r for r in self.rules
-            if r.priority == "HARD" and _is_rule_applicable(r, context)
-        ]
+    def _applicable_hard(
+        self, effective_context: dict
+    ) -> tuple[list[Rule], list[dict], bool]:
+        rules: list[Rule] = []
+        events: list[dict] = []
+        hard_error = False
+        for r in self.rules:
+            if r.priority != "HARD":
+                continue
+            applicable, event = _resolve_condition(
+                r.condition, effective_context, self.predicate_registry
+            )
+            if event is not None:
+                events.append(event)
+                if event["error"] is not None:
+                    hard_error = True
+                    continue  # rule does not apply, but error recorded
+            if applicable:
+                rules.append(r)
+        return rules, events, hard_error
 
     def _allowed_frames(self, hard_rules: list[Rule]) -> list[tuple[str, str, str, str]]:
         """Return list of (register, coord, strategy, tier) allowed by all HARD rules."""
@@ -190,31 +244,20 @@ class Engine:
         allowed_memory_ref: str | None = None,
         gate_available: bool = True,
     ) -> DecisionTrace:
-        # Fail-closed: if Gate unavailable, refuse to proceed.
         if not gate_available:
             raise GateUnavailableError(
                 "Gate context unavailable; refusing to select frame with cached memory"
             )
-
-        # Reserved key check: user context must not contain "memory".
         if _RESERVED_MEMORY_KEY in context:
             raise ValueError(
                 f"Reserved key {_RESERVED_MEMORY_KEY!r} in user context"
             )
 
-        # Build effective context: user context + memory namespace.
         effective_context: dict = dict(context)
         effective_context[_RESERVED_MEMORY_KEY] = dict(memory_context or {})
-        
-        # All rule conditions see effective_context.
-        # Memory-conditioned rules use condition path "memory.preferred_reasoning"
-        # through a dedicated resolver below.
-        hard_rules = self._applicable_hard(effective_context)
-        
-        allowed = self._allowed_frames(hard_rules)
-        target_revision = previous_frame.revision if previous_frame is not None else 0
 
-        # Hashes for trace
+        # Hashes and state
+        target_revision = previous_frame.revision if previous_frame is not None else 0
         ruleset_h = ruleset_hash(self.rules)
         registry_h = frame_registry_hash()
         input_h = _hash_payload({"context": context})
@@ -227,6 +270,27 @@ class Engine:
                 frame_hash(previous_frame) if previous_frame is not None else None
             )
         })
+        registry_hash = self.predicate_registry.hash()
+
+        prev_frame_dict = (
+            {
+                "register": previous_frame.register,
+                "coordinate_system": previous_frame.coordinate_system,
+                "strategy": previous_frame.strategy,
+                "model_tier": previous_frame.model_tier,
+                "revision": previous_frame.revision,
+            }
+            if previous_frame is not None
+            else None
+        )
+
+        # HARD + predicate events
+        hard_rules, hard_predicate_events, hard_predicate_error = self._applicable_hard(
+            effective_context
+        )
+        predicates_evaluated: list[dict] = list(hard_predicate_events)
+
+        allowed = self._allowed_frames(hard_rules)
         allowed_h = _hash_payload({"allowed": allowed})
 
         rules_fired = [
@@ -234,7 +298,31 @@ class Engine:
             for r in hard_rules
         ]
 
-        # --- FRAME_CONFLICT: no allowed frames ---
+        # Fail-closed: HARD predicate error -> UNDETERMINED
+        if hard_predicate_error:
+            return DecisionTrace(
+                event="frame_undetermined",
+                ruleset_hash=ruleset_h,
+                frame_registry_hash=registry_h,
+                input_hash=input_h,
+                context_hash=context_h,
+                state_hash=state_h,
+                allowed_frames_hash=allowed_h,
+                allowed_memory_ref=allowed_memory_ref,
+                rules_fired=rules_fired,
+                classifier=None,
+                conflict=False,
+                conflict_reason="none",
+                resolution="none",
+                previous_frame=prev_frame_dict,
+                selected_frame=None,
+                revision=target_revision,
+                undetermined_reason="hard_predicate_error",
+                predicate_registry_hash=registry_hash,
+                predicates_evaluated=predicates_evaluated,
+            )
+
+        # FRAME_CONFLICT
         if not allowed:
             return DecisionTrace(
                 event="frame_conflict",
@@ -250,23 +338,15 @@ class Engine:
                 conflict=True,
                 conflict_reason="hard_vs_hard",
                 resolution="none",
-                previous_frame=(
-                    {
-                        "register": previous_frame.register,
-                        "coordinate_system": previous_frame.coordinate_system,
-                        "strategy": previous_frame.strategy,
-                        "model_tier": previous_frame.model_tier,
-                        "revision": previous_frame.revision,
-                    }
-                    if previous_frame is not None
-                    else None
-                ),
+                previous_frame=prev_frame_dict,
                 selected_frame=None,
                 revision=target_revision,
                 undetermined_reason=None,
+                predicate_registry_hash=registry_hash,
+                predicates_evaluated=predicates_evaluated,
             )
 
-        # --- hard_unique: exactly one allowed frame ---
+        # hard_unique
         if len(allowed) == 1:
             reg, coord, strat, tier = allowed[0]
             candidate = CognitiveFrame(
@@ -276,19 +356,10 @@ class Engine:
                 model_tier=tier,
                 revision=target_revision,
             )
-
             if previous_frame is not None and not frames_same_config(candidate, previous_frame):
                 new_revision = previous_frame.revision + 1
             else:
                 new_revision = target_revision
-
-            selected = CognitiveFrame(
-                register=reg,
-                coordinate_system=coord,
-                strategy=strat,
-                model_tier=tier,
-                revision=new_revision,
-            )
 
             classifier_differs = (
                 classifier_proposal is not None
@@ -326,17 +397,7 @@ class Engine:
                 conflict=classifier_differs,
                 conflict_reason="hard_vs_classifier" if classifier_differs else "none",
                 resolution="hard_unique",
-                previous_frame=(
-                    {
-                        "register": previous_frame.register,
-                        "coordinate_system": previous_frame.coordinate_system,
-                        "strategy": previous_frame.strategy,
-                        "model_tier": previous_frame.model_tier,
-                        "revision": previous_frame.revision,
-                    } 
-                    if previous_frame is not None
-                    else None
-                ),
+                previous_frame=prev_frame_dict,
                 selected_frame={
                     "register": reg,
                     "coordinate_system": coord,
@@ -346,14 +407,24 @@ class Engine:
                 },
                 revision=new_revision,
                 undetermined_reason=None,
+                predicate_registry_hash=registry_hash,
+                predicates_evaluated=predicates_evaluated,
             )
 
-                # --- multiple allowed: classifier first, then SOFT ranking ---
-
-        applicable_soft = [
-            r for r in self.rules
-            if r.priority == "SOFT" and _is_rule_applicable(r, effective_context)
-        ]
+        # SOFT
+        applicable_soft: list[Rule] = []
+        for r in self.rules:
+            if r.priority != "SOFT":
+                continue
+            applicable, event = _resolve_condition(
+                r.condition, effective_context, self.predicate_registry
+            )
+            if event is not None:
+                predicates_evaluated.append(event)
+                if event["error"] is not None:
+                    continue
+            if applicable:
+                applicable_soft.append(r)
 
         rules_fired_soft = [
             {"id": r.id, "priority": r.priority, "weight": r.weight}
@@ -361,7 +432,7 @@ class Engine:
         ]
         all_rules_fired = rules_fired + rules_fired_soft
 
-        # 1. Classifier acceptance inside ALLOWED
+        # classifier_accepted
         if classifier_proposal is not None:
             matched = _classifier_matches_allowed(classifier_proposal, allowed)
             if matched is not None:
@@ -397,17 +468,7 @@ class Engine:
                     conflict=False,
                     conflict_reason="none",
                     resolution="classifier_accepted",
-                    previous_frame=(
-                        {
-                            "register": previous_frame.register,
-                            "coordinate_system": previous_frame.coordinate_system,
-                            "strategy": previous_frame.strategy,
-                            "model_tier": previous_frame.model_tier,
-                            "revision": previous_frame.revision,
-                        }
-                        if previous_frame is not None
-                        else None
-                    ),
+                    previous_frame=prev_frame_dict,
                     selected_frame={
                         "register": reg,
                         "coordinate_system": coord,
@@ -417,27 +478,26 @@ class Engine:
                     },
                     revision=new_revision,
                     undetermined_reason=None,
+                    predicate_registry_hash=registry_hash,
+                    predicates_evaluated=predicates_evaluated,
                 )
 
-        # 2. SOFT ranking inside ALLOWED
+        # SOFT scoring
         scored: list[tuple[int, tuple[str, str, str, str]]] = []
         for entry in allowed:
             reg, coord, strat, tier = entry
             score = 0
             for r in applicable_soft:
                 if _frame_satisfies_soft(reg, coord, strat, r.frame):
-                    score += r.weight  # positive int guaranteed by is_valid_rule
+                    score += r.weight
             scored.append((score, entry))
 
         if not scored:
-            # allowed non-empty, but scored empty - shouldn't happen
-            max_score = 0
             winners: list[tuple[str, str, str, str]] = []
         else:
             max_score = max(s for s, _ in scored)
             winners = [entry for s, entry in scored if s == max_score]
 
-        # 3. Unique SOFT winner
         if len(winners) == 1:
             reg, coord, strat, tier = winners[0]
             candidate = CognitiveFrame(
@@ -475,17 +535,7 @@ class Engine:
                 conflict=False,
                 conflict_reason="none",
                 resolution="soft_rule_accept",
-                previous_frame=(
-                    {
-                        "register": previous_frame.register,
-                        "coordinate_system": previous_frame.coordinate_system,
-                        "strategy": previous_frame.strategy,
-                        "model_tier": previous_frame.model_tier,
-                        "revision": previous_frame.revision,
-                    }
-                    if previous_frame is not None
-                    else None
-                ),
+                previous_frame=prev_frame_dict,
                 selected_frame={
                     "register": reg,
                     "coordinate_system": coord,
@@ -495,11 +545,12 @@ class Engine:
                 },
                 revision=new_revision,
                 undetermined_reason=None,
+                predicate_registry_hash=registry_hash,
+                predicates_evaluated=predicates_evaluated,
             )
 
-                # 4. DEFAULT, then UNDETERMINED
+        # DEFAULT
         if self.default_frame is not None:
-            # Is default inside ALLOWED?
             default_entry = (
                 self.default_frame.register,
                 self.default_frame.coordinate_system,
@@ -543,17 +594,7 @@ class Engine:
                     conflict=False,
                     conflict_reason="none",
                     resolution="default",
-                    previous_frame=(
-                        {
-                            "register": previous_frame.register,
-                            "coordinate_system": previous_frame.coordinate_system,
-                            "strategy": previous_frame.strategy,
-                            "model_tier": previous_frame.model_tier,
-                            "revision": previous_frame.revision,
-                        }
-                        if previous_frame is not None
-                        else None
-                    ),
+                    previous_frame=prev_frame_dict,
                     selected_frame={
                         "register": reg,
                         "coordinate_system": coord,
@@ -563,9 +604,11 @@ class Engine:
                     },
                     revision=new_revision,
                     undetermined_reason=None,
+                    predicate_registry_hash=registry_hash,
+                    predicates_evaluated=predicates_evaluated,
                 )
 
-        # 5. UNDETERMINED: choose reason
+        # UNDETERMINED
         if not hard_rules and not applicable_soft:
             reason = "no_applicable_rule_no_valid_proposal_no_default"
         else:
@@ -585,18 +628,10 @@ class Engine:
             conflict=False,
             conflict_reason="none",
             resolution="none",
-            previous_frame=(
-                {
-                    "register": previous_frame.register,
-                    "coordinate_system": previous_frame.coordinate_system,
-                    "strategy": previous_frame.strategy,
-                    "model_tier": previous_frame.model_tier,
-                    "revision": previous_frame.revision,
-                }
-                if previous_frame is not None
-                else None
-            ),
+            previous_frame=prev_frame_dict,
             selected_frame=None,
             revision=target_revision,
             undetermined_reason=reason,
+            predicate_registry_hash=registry_hash,
+            predicates_evaluated=predicates_evaluated,
         )

@@ -63,6 +63,8 @@ class DecisionTrace:
     allowed_memory_ref: str | None = None
     undetermined_reason: str | None = None
     contract_version: str = CONTRACT_VERSION
+    predicate_registry_hash: str | None = None
+    predicates_evaluated: list[dict[str, Any]] = field(default_factory=list)
 
 
 def is_valid_trace(trace: DecisionTrace) -> bool:
