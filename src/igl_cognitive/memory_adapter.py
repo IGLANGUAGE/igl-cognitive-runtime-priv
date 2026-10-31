@@ -54,19 +54,43 @@ class MemoryAdapterDiagnostics:
 
 
 def _extract_feature(belief: dict[str, Any]) -> tuple[str, Any] | None:
-    """Extract (key, value) from an accepted belief.
+    """Extract (key, value) from an accepted item.
 
-    Supported shape (CE.2 stage 1):
-      belief["content"] = {"key": "...", "value": ...}
-    Returns None if shape is not recognized.
+    Supports two shapes:
+
+    1. Mock shape:
+        {"content": {"key": "...", "value": ...}}
+
+    2. Real IGL Gate shape:
+        {"belief": {"value": {"key": "...", "value": ...}, ...},
+         "trusted": bool, "applicable": bool, ...}
+
+    For the real shape, `trusted` and `applicable` must both be True
+    (if present) for the item to be used.
     """
+    # Real Gate shape: wrapper with belief
+    inner = belief.get("belief")
+    if isinstance(inner, dict):
+        trusted = belief.get("trusted", True)
+        applicable = belief.get("applicable", True)
+        if not (trusted and applicable):
+            return None
+        value_obj = inner.get("value")
+        if isinstance(value_obj, dict):
+            key = value_obj.get("key")
+            if isinstance(key, str):
+                return key, value_obj.get("value")
+        return None
+
+    # Mock shape: content
     content = belief.get("content")
-    if not isinstance(content, dict):
+    if isinstance(content, dict):
+        key = content.get("key")
+        if isinstance(key, str):
+            return key, content.get("value")
         return None
-    key = content.get("key")
-    if not isinstance(key, str):
-        return None
-    return key, content.get("value")
+
+    return None
 
 
 def build_allowed_memory(gate_result: dict[str, Any]) -> tuple[AllowedMemory, MemoryAdapterDiagnostics]:

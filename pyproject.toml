@@ -17,3 +17,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: live integration tests against a running IGL Memory server",
+]
