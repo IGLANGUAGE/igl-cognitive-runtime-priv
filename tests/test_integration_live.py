@@ -200,3 +200,80 @@ def test_l1_record_compile_gate_engine():
     assert trace.selected_frame["strategy"] == "formal_derivation"
     assert trace.selected_frame["model_tier"] == "strong"
     assert trace.allowed_memory_ref == allowed.allowed_memory_ref
+
+
+# --- L2: Correction ---
+
+def test_l2_correction():
+    """L2: correction changes which belief Gate serves.
+
+    Steps:
+      1. record preferred_reasoning=mathematics
+      2. compile
+      3. correct(belief_id, value=philosophy)
+      4. gate -> accepted contains philosophy, NOT mathematics
+      5. memory_context == {preferred_reasoning_philosophy: True}
+      6. Engine -> hypothesis/philosophy/conceptual_exploration/strong
+    """
+    client = _client()
+    _forget_all(client)
+
+    event = client.record(
+        event_type="explicit_preference",
+        content={"key": "preferred_reasoning", "value": "mathematics"},
+    )
+    assert event.id
+
+    compile_result = client.compile([event.id])
+    assert compile_result.committed, "compile produced no beliefs"
+    belief_id = compile_result.committed[0].id
+
+    correct_result = client.correct(
+        belief_id=belief_id,
+        value={"key": "preferred_reasoning", "value": "philosophy"},
+    )
+    assert correct_result is not None
+
+    gate_result = client.gate(purpose="reasoning_selection", context={})
+    gate_dict = _gate_dict(gate_result)
+    assert gate_dict["accepted"], "gate accepted is empty after correction"
+
+    # Accepted must contain philosophy, NOT mathematics
+    accepted_values = []
+    for item in gate_dict["accepted"]:
+        inner = item.get("belief", {})
+        value_obj = inner.get("value", {})
+        if value_obj.get("key") == "preferred_reasoning":
+            accepted_values.append(value_obj.get("value"))
+
+    assert "philosophy" in accepted_values, (
+        f"corrected value not in accepted: {accepted_values}"
+    )
+    assert "mathematics" not in accepted_values, (
+        f"old value still in accepted after correction: {accepted_values}"
+    )
+
+    # Build memory_context via explicit mapping
+    memory_context = _to_memory_context(gate_dict["accepted"])
+    assert memory_context == {"preferred_reasoning_philosophy": True}, (
+        f"unexpected memory_context: {memory_context}"
+    )
+
+    allowed, _ = build_allowed_memory(gate_dict)
+
+    engine = _engine()
+    trace = engine.select(
+        context={},
+        classifier_proposal=None,
+        previous_frame=None,
+        memory_context=memory_context,
+        allowed_memory_ref=allowed.allowed_memory_ref,
+    )
+
+    assert trace.event == "frame_selection"
+    assert trace.resolution == "hard_unique"
+    assert trace.selected_frame is not None
+    assert trace.selected_frame["register"] == "hypothesis"
+    assert trace.selected_frame["coordinate_system"] == "philosophy"
+    assert trace.selected_frame["strategy"] == "conceptual_exploration"
+    assert trace.selected_frame["model_tier"] == "strong"
